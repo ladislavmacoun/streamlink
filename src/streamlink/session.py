@@ -60,6 +60,7 @@ class Streamlink(object):
 
         self.http = api.HTTPSession()
         self.options = Options({
+            "dash-manifest-reload-attempts": 3,
             "hds-live-edge": 10.0,
             "hds-segment-attempts": 3,
             "hds-segment-threads": 1,

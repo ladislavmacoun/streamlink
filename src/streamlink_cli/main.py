@@ -762,6 +762,9 @@ def setup_streamlink():
 
 def setup_options():
     """Sets Streamlink options."""
+    if args.dash_manifest_reload_attempts:
+        streamlink.set_option("dash-manifest-reload-attempts", args.dash_manifest_reload_attempts)
+
     if args.hls_live_edge:
         streamlink.set_option("hls-live-edge", args.hls_live_edge)
 

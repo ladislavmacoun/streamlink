@@ -73,6 +73,7 @@ class DASHStreamWorker(SegmentedStreamWorker):
         SegmentedStreamWorker.__init__(self, *args, **kwargs)
         self.mpd = self.stream.mpd
         self.period = self.stream.period
+        self.manifest_reload_retries = self.session.options.get("dash-manifest-reload-attempts")
 
     @staticmethod
     def get_representation(mpd, representation_id, mime_type):
@@ -112,7 +113,10 @@ class DASHStreamWorker(SegmentedStreamWorker):
 
         self.reader.buffer.wait_free()
         log.debug("Reloading manifest ({0}:{1})".format(self.reader.representation_id, self.reader.mime_type))
-        res = self.session.http.get(self.mpd.url, exception=StreamError, **self.stream.args)
+        res = self.session.http.get(self.mpd.url,
+                                    exception=StreamError,
+                                    retries=self.manifest_reload_retries,
+                                    **self.stream.args)
 
         new_mpd = MPD(self.session.http.xml(res, ignore_ns=True),
                       base_url=self.mpd.base_url,

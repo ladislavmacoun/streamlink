@@ -675,6 +675,16 @@ def build_parser():
 
     transport = parser.add_argument_group("Stream transport options")
     transport.add_argument(
+        "--dash-manifest-reload-attempts",
+        type=num(int, min=0),
+        metavar="ATTEMPTS",
+        help="""
+        How many attempts should be made to reload a dynamic DASH manifest.
+
+        Default is 3.
+        """
+    )
+    transport.add_argument(
         "--hds-live-edge",
         type=num(float, min=0),
         metavar="SECONDS",
