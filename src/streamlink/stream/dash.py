@@ -156,7 +156,8 @@ class DASHStream(Stream):
                  **args):
         super(DASHStream, self).__init__(session)
         self.mpd = mpd
-        self.video_representation = video_representation
+        # Customization: Forcefully discard dash video streams, since we're only interested in audio
+        self.video_representation = None
         self.audio_representation = audio_representation
         self.period = period
         self.args = args
