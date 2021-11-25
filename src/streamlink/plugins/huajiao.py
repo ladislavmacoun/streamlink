@@ -1,23 +1,19 @@
 import base64
+import json
+import random
 import re
 import time
 import uuid
-import random
-import json
 
-from streamlink.plugin import Plugin
+from streamlink.plugin import Plugin, pluginmatcher
 from streamlink.plugin.api import validate
 from streamlink.plugin.api.useragents import CHROME as USER_AGENT
-from streamlink.stream import (HTTPStream, HLSStream)
+from streamlink.stream.hls import HLSStream
+from streamlink.stream.http import HTTPStream
 
 HUAJIAO_URL = "http://www.huajiao.com/l/{}"
 LAPI_URL = "http://g2.live.360.cn/liveplay?stype=flv&channel={}&bid=huajiao&sn={}&sid={}&_rate=xd&ts={}&r={}" \
            "&_ostype=flash&_delay=0&_sign=null&_ver=13"
-
-_url_re = re.compile(r"""
-        http(s)?://(www\.)?huajiao.com
-        /l/(?P<channel>[^/]+)
-""", re.VERBOSE)
 
 _feed_json_re = re.compile(r'^\s*var\s*feed\s*=\s*(?P<feed>{.*})\s*;', re.MULTILINE)
 
@@ -35,14 +31,12 @@ _feed_json_schema = validate.Schema(
 )
 
 
+@pluginmatcher(re.compile(
+    r"https?://(www\.)?huajiao\.com/l/(?P<channel>[^/]+)"
+))
 class Huajiao(Plugin):
-    @classmethod
-    def can_handle_url(self, url):
-        return _url_re.match(url)
-
     def _get_streams(self):
-        match = _url_re.match(self.url)
-        channel = match.group("channel")
+        channel = self.match.group("channel")
 
         self.session.http.headers.update({"User-Agent": USER_AGENT})
         self.session.http.verify = False

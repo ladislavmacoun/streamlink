@@ -1,30 +1,89 @@
 import time
-from requests import Session, __build__ as requests_version
-from requests.adapters import HTTPAdapter
+from typing import Any, Callable, List, Pattern, Tuple
 
+import requests.adapters
+import urllib3
+from requests import Session
+
+from streamlink.exceptions import PluginError
 from streamlink.packages.requests_file import FileAdapter
 from streamlink.plugin.api import useragents
+from streamlink.utils.parse import parse_json, parse_xml
+
+
+urllib3_version = tuple(map(int, urllib3.__version__.split(".")[:3]))
+
 
 try:
-    from requests.packages.urllib3.util import Timeout
-
-    TIMEOUT_ADAPTER_NEEDED = requests_version < 0x020300
-except ImportError:
-    TIMEOUT_ADAPTER_NEEDED = False
-
-try:
-    from requests.packages import urllib3
-
     # We tell urllib3 to disable warnings about unverified HTTPS requests,
     # because in some plugins we have to do unverified requests intentionally.
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-except (ImportError, AttributeError):
+except AttributeError:
     pass
 
-from ...exceptions import PluginError
-from ...utils import parse_json, parse_xml
 
-__all__ = ["HTTPSession"]
+class _HTTPResponse(urllib3.response.HTTPResponse):
+    def __init__(self, *args, **kwargs):
+        # Always enforce content length validation!
+        # This fixes a bug in requests which doesn't raise errors on HTTP responses where
+        # the "Content-Length" header doesn't match the response's body length.
+        # https://github.com/psf/requests/issues/4956#issuecomment-573325001
+        #
+        # Summary:
+        # This bug is related to urllib3.response.HTTPResponse.stream() which calls urllib3.response.HTTPResponse.read() as
+        # a wrapper for http.client.HTTPResponse.read(amt=...), where no http.client.IncompleteRead exception gets raised
+        # due to "backwards compatiblity" of an old bug if a specific amount is attempted to be read on an incomplete response.
+        #
+        # urllib3.response.HTTPResponse.read() however has an additional check implemented via the enforce_content_length
+        # parameter, but it doesn't check by default and requests doesn't set the parameter for enabling it either.
+        #
+        # Fix this by overriding urllib3.response.HTTPResponse's constructor and always setting enforce_content_length to True,
+        # as there is no way to make requests set this parameter on its own.
+        kwargs.update({"enforce_content_length": True})
+        super().__init__(*args, **kwargs)
+
+
+# override all urllib3.response.HTTPResponse references in requests.adapters.HTTPAdapter.send
+urllib3.connectionpool.HTTPConnectionPool.ResponseCls = _HTTPResponse
+requests.adapters.HTTPResponse = _HTTPResponse
+
+
+# Never convert percent-encoded characters to uppercase in urllib3>=1.25.4.
+# This is required for sites which compare request URLs byte for byte and return different responses depending on that.
+# Older versions of urllib3 are not compatible with this override and will always convert to uppercase characters.
+#
+# https://datatracker.ietf.org/doc/html/rfc3986#section-2.1
+# > The uppercase hexadecimal digits 'A' through 'F' are equivalent to
+# > the lowercase digits 'a' through 'f', respectively.  If two URIs
+# > differ only in the case of hexadecimal digits used in percent-encoded
+# > octets, they are equivalent.  For consistency, URI producers and
+# > normalizers should use uppercase hexadecimal digits for all percent-
+# > encodings.
+if urllib3_version >= (1, 25, 4):
+    class Urllib3UtilUrlPercentReOverride:
+        _re_percent_encoding: Pattern = urllib3.util.url.PERCENT_RE
+
+        @classmethod
+        def _num_percent_encodings(cls, string) -> int:
+            return len(cls._re_percent_encoding.findall(string))
+
+        # urllib3>=1.25.8
+        # https://github.com/urllib3/urllib3/blame/1.25.8/src/urllib3/util/url.py#L219-L227
+        @classmethod
+        def subn(cls, repl: Callable, string: str) -> Tuple[str, int]:
+            return string, cls._num_percent_encodings(string)
+
+        # urllib3>=1.25.4,<1.25.8
+        # https://github.com/urllib3/urllib3/blame/1.25.4/src/urllib3/util/url.py#L218-L228
+        @classmethod
+        def findall(cls, string: str) -> List[Any]:
+            class _List(list):
+                def __len__(self) -> int:
+                    return cls._num_percent_encodings(string)
+
+            return _List()
+
+    urllib3.util.url.PERCENT_RE = Urllib3UtilUrlPercentReOverride
 
 
 def _parse_keyvalue_list(val):
@@ -36,42 +95,12 @@ def _parse_keyvalue_list(val):
             continue
 
 
-class HTTPAdapterWithReadTimeout(HTTPAdapter):
-    """This is a backport of the timeout behaviour from requests 2.3.0+
-       where timeout is applied to both connect and read."""
-
-    def get_connection(self, *args, **kwargs):
-        conn = HTTPAdapter.get_connection(self, *args, **kwargs)
-
-        # Override the urlopen method on this connection
-        if not hasattr(conn.urlopen, "wrapped"):
-            orig_urlopen = conn.urlopen
-
-            def urlopen(*args, **kwargs):
-                timeout = kwargs.pop("timeout", None)
-                if isinstance(timeout, Timeout):
-                    timeout = Timeout.from_float(timeout.connect_timeout)
-
-                return orig_urlopen(*args, timeout=timeout, **kwargs)
-
-            conn.urlopen = urlopen
-            conn.urlopen.wrapped = True
-
-        return conn
-
-
 class HTTPSession(Session):
-    def __init__(self, *args, **kwargs):
-        Session.__init__(self, *args, **kwargs)
+    def __init__(self):
+        super().__init__()
 
-        if self.headers['User-Agent'].startswith('python-requests'):
-            self.headers['User-Agent'] = useragents.FIREFOX
-
+        self.headers['User-Agent'] = useragents.FIREFOX
         self.timeout = 20.0
-
-        if TIMEOUT_ADAPTER_NEEDED:
-            self.mount("http://", HTTPAdapterWithReadTimeout())
-            self.mount("https://", HTTPAdapterWithReadTimeout())
 
         self.mount('file://', FileAdapter())
 
@@ -159,12 +188,16 @@ class HTTPSession(Session):
 
         while True:
             try:
-                res = Session.request(self, method, url,
-                                      headers=headers,
-                                      params=params,
-                                      timeout=timeout,
-                                      proxies=proxies,
-                                      *args, **kwargs)
+                res = super().request(
+                    method,
+                    url,
+                    headers=headers,
+                    params=params,
+                    timeout=timeout,
+                    proxies=proxies,
+                    *args,
+                    **kwargs
+                )
                 if raise_for_status and res.status_code not in acceptable_status:
                     res.raise_for_status()
                 break
@@ -172,8 +205,7 @@ class HTTPSession(Session):
                 raise
             except Exception as rerr:
                 if retries >= total_retries:
-                    err = exception("Unable to open URL: {url} ({err})".format(url=url,
-                                                                               err=rerr))
+                    err = exception(f"Unable to open URL: {url} ({rerr})")
                     err.err = rerr
                     raise err
                 retries += 1
@@ -186,3 +218,6 @@ class HTTPSession(Session):
             res = schema.validate(res.text, name="response text", exception=PluginError)
 
         return res
+
+
+__all__ = ["HTTPSession"]

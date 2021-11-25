@@ -1,38 +1,28 @@
-from __future__ import print_function
+import logging
 import re
 
-from streamlink.plugin import Plugin
+from streamlink.plugin import Plugin, pluginmatcher
 from streamlink.plugin.api import validate
-from streamlink.stream import HLSStream
+from streamlink.stream.hls import HLSStream
+
+log = logging.getLogger(__name__)
 
 
+@pluginmatcher(re.compile(
+    r'https?://www\.tv8\.com\.tr/canli-yayin'
+))
 class TV8(Plugin):
-    """
-    Support for the live stream on www.tv8.com.tr
-    """
-    url_re = re.compile(r"https?://www.tv8.com.tr/canli-yayin")
+    _re_hls = re.compile(r"""file\s*:\s*(["'])(?P<hls_url>https?://.*?\.m3u8.*?)\1""")
 
-    player_config_re = re.compile(r'''file:\s*"(.*?)"''')
-    player_config_schema = validate.Schema(
-        validate.transform(player_config_re.search),
-        validate.any(
-            None,
-            validate.all(
-                validate.get(1),
-                validate.url()
-            )
-        )
-    )
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls.url_re.match(url) is not None
+    title = "TV8"
 
     def _get_streams(self):
-        res = self.session.http.get(self.url)
-        stream_url = self.player_config_schema.validate(res.text)
-        if stream_url:
-            return HLSStream.parse_variant_playlist(self.session, stream_url)
+        hls_url = self.session.http.get(self.url, schema=validate.Schema(
+            validate.transform(self._re_hls.search),
+            validate.any(None, validate.get("hls_url"))
+        ))
+        if hls_url is not None:
+            return HLSStream.parse_variant_playlist(self.session, hls_url)
 
 
 __plugin__ = TV8

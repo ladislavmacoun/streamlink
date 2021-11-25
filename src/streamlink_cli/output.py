@@ -1,14 +1,16 @@
 import logging
 import os
+import re
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 from time import sleep
+from typing import BinaryIO, Optional
 
-from streamlink.utils.encoding import get_filesystem_encoding, maybe_encode, maybe_decode
-from .compat import is_win32, stdout
-from .constants import DEFAULT_PLAYER_ARGUMENTS, SUPPORTED_PLAYERS
-from .utils import ignored
+from streamlink_cli.compat import is_win32, stdout
+from streamlink_cli.constants import PLAYER_ARGS_INPUT_DEFAULT, PLAYER_ARGS_INPUT_FALLBACK, SUPPORTED_PLAYERS
+from streamlink_cli.utils import Formatter, ignored
 
 if is_win32:
     import msvcrt
@@ -16,7 +18,7 @@ if is_win32:
 log = logging.getLogger("streamlink.cli.output")
 
 
-class Output(object):
+class Output:
     def __init__(self):
         self.opened = False
 
@@ -32,7 +34,7 @@ class Output(object):
 
     def write(self, data):
         if not self.opened:
-            raise IOError("Output is not opened")
+            raise OSError("Output is not opened")
 
         return self._write(data)
 
@@ -47,14 +49,20 @@ class Output(object):
 
 
 class FileOutput(Output):
-    def __init__(self, filename=None, fd=None, record=None):
-        super(FileOutput, self).__init__()
+    def __init__(
+        self,
+        filename: Optional[Path] = None,
+        fd: Optional[BinaryIO] = None,
+        record: Optional["FileOutput"] = None
+    ):
+        super().__init__()
         self.filename = filename
         self.fd = fd
         self.record = record
 
     def _open(self):
         if self.filename:
+            self.filename.parent.mkdir(parents=True, exist_ok=True)
             self.fd = open(self.filename, "wb")
 
         if self.record:
@@ -78,9 +86,14 @@ class FileOutput(Output):
 class PlayerOutput(Output):
     PLAYER_TERMINATE_TIMEOUT = 10.0
 
-    def __init__(self, cmd, args=DEFAULT_PLAYER_ARGUMENTS, filename=None, quiet=True, kill=True,
+    _re_player_args_input = re.compile("|".join(map(
+        lambda const: re.escape(f"{{{const}}}"),
+        [PLAYER_ARGS_INPUT_DEFAULT, PLAYER_ARGS_INPUT_FALLBACK]
+    )))
+
+    def __init__(self, cmd, args="", filename=None, quiet=True, kill=True,
                  call=False, http=None, namedpipe=None, record=None, title=None):
-        super(PlayerOutput, self).__init__()
+        super().__init__()
         self.cmd = cmd
         self.args = args
         self.kill = kill
@@ -107,6 +120,9 @@ class PlayerOutput(Output):
             self.stdout = sys.stdout
             self.stderr = sys.stderr
 
+        if not self._re_player_args_input.search(self.args):
+            self.args += f"{' ' if self.args else ''}{{{PLAYER_ARGS_INPUT_DEFAULT}}}"
+
     @property
     def running(self):
         sleep(0.5)
@@ -131,47 +147,14 @@ class PlayerOutput(Output):
                 if cmd.startswith(possiblecmd):
                     return player
 
-    @classmethod
-    def _mpv_title_escape(cls, title_string):
-        # mpv has a "disable property-expansion" token which must be handled
-        # in order to accurately represent $$ in title
-        if r'\$>' in title_string:
-            processed_title = ""
-            double_dollars = True
-            i = dollars = 0
-            while i < len(title_string):
-                if double_dollars:
-                    if title_string[i] == "\\":
-                        if title_string[i + 1] == "$":
-                            processed_title += "$"
-                            dollars += 1
-                            i += 1
-                            if title_string[i + 1] == ">" and dollars % 2 == 1:
-                                double_dollars = False
-                                processed_title += ">"
-                                i += 1
-                        else:
-                            processed_title += "\\"
-                    elif title_string[i] == "$":
-                        processed_title += "$$"
-                    else:
-                        dollars = 0
-                        processed_title += title_string[i]
-                else:
-                    if title_string[i:i + 2] == "\\$":
-                        processed_title += "$"
-                        i += 1
-                    else:
-                        processed_title += title_string[i]
-                i += 1
-            return processed_title
-        else:
-            # not possible for property-expansion to be disabled, happy days
-            return title_string.replace("$", "$$").replace(r'\$$', "$")
-
     def _create_arguments(self):
         if self.namedpipe:
             filename = self.namedpipe.path
+            if is_win32:
+                if self.player_name == "vlc":
+                    filename = f"stream://\\{filename}"
+                elif self.player_name == "mpv":
+                    filename = f"file://{filename}"
         elif self.filename:
             filename = self.filename
         elif self.http:
@@ -185,13 +168,12 @@ class PlayerOutput(Output):
             if self.player_name == "vlc":
                 # see https://wiki.videolan.org/Documentation:Format_String/, allow escaping with \$
                 self.title = self.title.replace("$", "$$").replace(r'\$$', "$")
-                extra_args.extend([u"--input-title-format", self.title])
+                extra_args.extend(["--input-title-format", self.title])
 
             # mpv
             if self.player_name == "mpv":
-                # see https://mpv.io/manual/stable/#property-expansion, allow escaping with \$, respect mpv's $>
-                self.title = self._mpv_title_escape(self.title)
-                extra_args.append(u"--title={}".format(self.title))
+                # property expansion is only available in MPV's --title parameter
+                extra_args.append(f"--force-media-title={self.title}")
 
             # potplayer
             if self.player_name == "potplayer":
@@ -202,14 +184,19 @@ class PlayerOutput(Output):
                     self.title = self.title.replace('"', '')
                     filename = filename[:-1] + '\\' + self.title + filename[-1]
 
-        args = self.args.format(filename=filename)
+        # format args via the formatter, so that invalid/unknown variables don't raise a KeyError
+        argsformatter = Formatter({
+            PLAYER_ARGS_INPUT_DEFAULT: lambda: filename,
+            PLAYER_ARGS_INPUT_FALLBACK: lambda: filename
+        })
+        args = argsformatter.title(self.args)
         cmd = self.cmd
 
         # player command
         if is_win32:
-            eargs = maybe_decode(subprocess.list2cmdline(extra_args))
+            eargs = subprocess.list2cmdline(extra_args)
             # do not insert and extra " " when there are no extra_args
-            return u' '.join([cmd] + ([eargs] if eargs else []) + [args])
+            return " ".join([cmd] + ([eargs] if eargs else []) + [args])
         return shlex.split(cmd) + extra_args + shlex.split(args)
 
     def _open(self):
@@ -232,9 +219,9 @@ class PlayerOutput(Output):
             fargs = args
         else:
             fargs = subprocess.list2cmdline(args)
-        log.debug(u"Calling: {0}".format(fargs))
+        log.debug(f"Calling: {fargs}")
 
-        subprocess.call(maybe_encode(args, get_filesystem_encoding()),
+        subprocess.call(args,
                         stdout=self.stdout,
                         stderr=self.stderr)
 
@@ -246,9 +233,9 @@ class PlayerOutput(Output):
             fargs = args
         else:
             fargs = subprocess.list2cmdline(args)
-        log.debug(u"Opening subprocess: {0}".format(fargs))
+        log.debug(f"Opening subprocess: {fargs}")
 
-        self.player = subprocess.Popen(maybe_encode(args, get_filesystem_encoding()),
+        self.player = subprocess.Popen(args,
                                        stdin=self.stdin, bufsize=0,
                                        stdout=self.stdout,
                                        stderr=self.stderr)
@@ -257,7 +244,7 @@ class PlayerOutput(Output):
             raise OSError("Process exited prematurely")
 
         if self.namedpipe:
-            self.namedpipe.open("wb")
+            self.namedpipe.open()
         elif self.http:
             self.http.open()
 

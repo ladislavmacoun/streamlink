@@ -4,15 +4,15 @@ import re
 from string import printable
 from textwrap import dedent
 
-from streamlink import logger
+from streamlink import __version__ as streamlink_version, logger
 from streamlink.utils.args import (
     boolean, comma_list, comma_list_filter, filesize, keyvalue, num
 )
 from streamlink.utils.times import hours_minutes_seconds
-from .constants import (
-    LIVESTREAMER_VERSION, STREAM_PASSTHROUGH, DEFAULT_PLAYER_ARGUMENTS, DEFAULT_STREAM_METADATA, SUPPORTED_PLAYERS
+from streamlink_cli.constants import (
+    PLAYER_ARGS_INPUT_DEFAULT, PLAYER_ARGS_INPUT_FALLBACK, STREAM_PASSTHROUGH, SUPPORTED_PLAYERS
 )
-from .utils import find_default_player
+from streamlink_cli.utils import find_default_player
 
 _printable_re = re.compile(r"[{0}]".format(printable))
 _option_re = re.compile(r"""
@@ -41,9 +41,9 @@ class ArgumentParser(argparse.ArgumentParser):
 
         name, value = option.group("name", "value")
         if name and value:
-            yield u"--{0}={1}".format(name, value)
+            yield f"--{name}={value}"
         elif name:
-            yield u"--{0}".format(name)
+            yield f"--{name}"
 
     def _match_argument(self, action, arg_strings_pattern):
         # - https://github.com/streamlink/streamlink/issues/971
@@ -76,6 +76,34 @@ class ArgumentParser(argparse.ArgumentParser):
         # return the number of arguments matched
         return len(match.group(1))
 
+    # fix `--help` not including nested argument groups
+    def format_help(self):
+        formatter = self._get_formatter()
+
+        # usage
+        formatter.add_usage(self.usage, self._actions,
+                            self._mutually_exclusive_groups)
+
+        # description
+        formatter.add_text(self.description)
+
+        def format_group(group):
+            # positionals, optionals and user-defined groups
+            for action_group in group._action_groups:
+                formatter.start_section(action_group.title)
+                formatter.add_text(action_group.description)
+                formatter.add_arguments(action_group._group_actions)
+                format_group(action_group)
+                formatter.end_section()
+
+        format_group(self)
+
+        # epilog
+        formatter.add_text(self.epilog)
+
+        # determine help from format above
+        return formatter.format_help()
+
 
 class HelpFormatter(argparse.RawDescriptionHelpFormatter):
     """A nicer help formatter.
@@ -105,7 +133,7 @@ def build_parser():
         add_help=False,
         usage="%(prog)s [OPTIONS] <URL> [STREAM]",
         description=dedent("""
-        Streamlink is command-line utility that extracts streams from various
+        Streamlink is a command-line utility that extracts streams from various
         services and pipes them into a video player of choice.
         """),
         epilog=dedent("""
@@ -162,7 +190,7 @@ def build_parser():
     general.add_argument(
         "-V", "--version",
         action="version",
-        version="%(prog)s {0}".format(LIVESTREAMER_VERSION),
+        version=f"%(prog)s {streamlink_version}",
         help="""
         Show version number and exit.
         """
@@ -226,6 +254,30 @@ def build_parser():
         """
     )
     general.add_argument(
+        "--logfile",
+        metavar="FILE",
+        help="""
+        Append log output to FILE instead of writing to stdout/stderr.
+
+        User prompts and download progress won't be written to FILE.
+
+        A value of ``-`` will set the file name to an ISO8601-like string
+        and will choose the following default log directories.
+
+        Windows:
+
+          %%TEMP%%\\streamlink\\logs
+
+        macOS:
+
+          ${HOME}/Library/Logs/streamlink
+
+        Linux/BSD:
+
+          ${XDG_STATE_HOME:-${HOME}/.local/state}/streamlink/logs
+        """
+    )
+    general.add_argument(
         "-Q", "--quiet",
         action="store_true",
         help="""
@@ -276,8 +328,26 @@ def build_parser():
         """
     )
     general.add_argument(
-        "--twitch-oauth-authenticate",
-        help=argparse.SUPPRESS
+        "--interface",
+        type=str,
+        metavar="INTERFACE",
+        help="""
+        Set the network interface.
+        """
+    )
+    general.add_argument(
+        "-4", "--ipv4",
+        action="store_true",
+        help="""
+        Resolve address names to IPv4 only. This option overrides :option:`-6`.
+        """
+    )
+    general.add_argument(
+        "-6", "--ipv6",
+        action="store_true",
+        help="""
+        Resolve address names to IPv6 only. This option overrides :option:`-4`.
+        """
     )
 
     player = parser.add_argument_group("Player options")
@@ -316,33 +386,36 @@ def build_parser():
     player.add_argument(
         "-a", "--player-args",
         metavar="ARGUMENTS",
-        default=DEFAULT_PLAYER_ARGUMENTS,
-        help="""
+        default="",
+        help=f"""
         This option allows you to customize the default arguments which are put
         together with the value of --player to create a command to execute.
-        Unlike the --player parameter, custom player arguments will not be logged.
 
-        This value can contain formatting variables surrounded by curly braces,
+        It's usually enough to only use --player instead of this unless you need
+        to add arguments after the player's input argument or if you don't want
+        any of the player arguments to be logged.
+
+        The value can contain formatting variables surrounded by curly braces,
         {{ and }}. If you need to include a brace character, it can be escaped
         by doubling, e.g. {{{{ and }}}}.
 
         Formatting variables available:
 
-        {{filename}}
-            This is the filename that the player will use. It's usually "-"
-            (stdin), but can also be a URL or a file depending on the options
-            used.
+        {{{PLAYER_ARGS_INPUT_DEFAULT}}}
+            This is the input that the player will use. For standard input (stdin),
+            it is ``-``, but it can also be a URL, depending on the options used.
 
-        It's usually enough to use --player instead of this unless you need to
-        add arguments after the filename.
-
-        Default is "{0}".
+        {{{PLAYER_ARGS_INPUT_FALLBACK}}}
+            The old fallback variable name with the same functionality.
 
         Example:
 
-          %(prog)s -p vlc -a "--play-and-exit {{filename}}" <url> [stream]
+          %(prog)s -p vlc -a "--play-and-exit {{{PLAYER_ARGS_INPUT_DEFAULT}}}" <url> [stream]
 
-        """.format(DEFAULT_PLAYER_ARGUMENTS)
+        Note: When neither of the variables are found, ``{{{PLAYER_ARGS_INPUT_DEFAULT}}}``
+        will be appended to the whole parameter value, to ensure that the player
+        always receives an input argument.
+        """
     )
     player.add_argument(
         "-v", "--verbose-player",
@@ -437,74 +510,27 @@ def build_parser():
     player.add_argument(
         "-t", "--title",
         metavar="TITLE",
-        help="""
-        This option allows you to supply a title to be displayed in the
-        title bar of the window that the video player is launched in.
+        help=f"""
+        Change the title of the video player's window.
 
-        This value can contain formatting variables surrounded by curly braces,
-        {{ and }}. If you need to include a brace character, it can be escaped
-        by doubling, e.g. {{{{ and }}}}.
+        Please see the "Metadata variables" section of Streamlink's CLI documentation for all available metadata variables.
 
-        This option is only supported for the following players: {0}.
+        This option is only supported for the following players: {', '.join(sorted(SUPPORTED_PLAYERS.keys()))}
 
         VLC specific information:
-            VLC has certain codes you can use inside your title.
-            These are accessible inside --title by using a backslash
-            before the dollar sign VLC uses to denote a format character.
-
-            e.g. to put the current date in your VLC window title,
-            the string "\\$A" could be inserted inside your --title string.
-
-            A full list of the format codes VLC uses is available here:
+            VLC does support special formatting variables on its own:
             https://wiki.videolan.org/Documentation:Format_String/
 
-        mpv specific information:
-            mpv has certain codes you can use inside your title.
-            These are accessible inside --title by using a backslash
-            before the dollar sign mpv uses to denote a format character.
+            These variables are accessible in the --title option by adding a backslash
+            in front of the dollar sign which VLC uses as its formatting character.
 
-            e.g. to put the current version of mpv running inside your
-            mpv window title, the string "\\${{{{mpv-version}}}}" could be
-            inserted inside your --title string.
+            For example, to put the current date in your VLC window title,
+            the string "\\\\$A" could be inserted inside the --title string.
 
-            A full list of the format codes mpv uses is available here:
-            https://mpv.io/manual/stable/#property-expansion
+        Example:
 
-        Formatting variables available to use in --title:
-
-        {{title}}
-            If available, this is the title of the stream.
-            Otherwise, it is the string "{1}"
-
-        {{author}}
-            If available, this is the author of the stream.
-            Otherwise, it is the string "{2}"
-
-        {{category}}
-            If available, this is the category the stream has been placed into.
-
-            - For Twitch, this is the game being played
-            - For YouTube, it's the category e.g. Gaming, Sports, Music...
-
-            Otherwise, it is the string "{3}"
-
-        {{game}}
-            This is just a synonym for {{category}} which may make more sense for
-            gaming oriented platforms. "Game being played" is a way to categorize
-            the stream, so it doesn't need its own separate handling.
-
-        {{url}}
-            URL of the stream.
-
-        Examples:
-
-            %(prog)s -p vlc --title "{{title}} -!- {{author}} -!- {{category}} \\$A" <url> [stream]
-            %(prog)s -p mpv --title "{{title}} -- {{author}} -- {{category}} -- (\\${{{{mpv-version}}}})" <url> [stream]
-
-        """.format(', '.join(sorted(SUPPORTED_PLAYERS.keys())),
-                   DEFAULT_STREAM_METADATA['title'],
-                   DEFAULT_STREAM_METADATA['author'],
-                   DEFAULT_STREAM_METADATA['category'])
+            %(prog)s -p mpv --title "{{author}} - {{category}} - {{title}}" <URL> [STREAM]
+        """
     )
 
     output = parser.add_argument_group("File output options")
@@ -515,6 +541,14 @@ def build_parser():
         Write stream data to FILENAME instead of playing it.
 
         You will be prompted if the file already exists.
+
+        Please see the "Metadata variables" section of Streamlink's CLI documentation for all available metadata variables.
+
+        Unsupported characters in substituted variables will be replaced with an underscore.
+
+        Example:
+
+            %(prog)s --output "~/recordings/{author}/{category}/{id}-{time:%Y%m%d%H%M%S}.ts" <URL> [STREAM]
         """
     )
     output.add_argument(
@@ -546,6 +580,14 @@ def build_parser():
         Open the stream in the player, while at the same time writing it to FILENAME.
 
         You will be prompted if the file already exists.
+
+        Please see the "Metadata variables" section of Streamlink's CLI documentation for all available metadata variables.
+
+        Unsupported characters in substituted variables will be replaced with an underscore.
+
+        Example:
+
+            %(prog)s --record "~/recordings/{author}/{category}/{id}-{time:%Y%m%d%H%M%S}.ts" <URL> [STREAM]
         """
     )
     output.add_argument(
@@ -555,6 +597,33 @@ def build_parser():
         Write stream data to stdout, while at the same time writing it to FILENAME.
 
         You will be prompted if the file already exists.
+
+        Please see the "Metadata variables" section of Streamlink's CLI documentation for all available metadata variables.
+
+        Unsupported characters in substituted variables will be replaced with an underscore.
+
+        Example:
+
+            %(prog)s --record-and-pipe "~/recordings/{author}/{category}/{id}-{time:%Y%m%d%H%M%S}.ts" <URL> [STREAM]
+        """
+    )
+    output.add_argument(
+        "--fs-safe-rules",
+        choices=["POSIX", "Windows"],
+        type=str,
+        help="""
+        The rules used to make formatting variables filesystem-safe are chosen
+        automatically according to the type of system in use. This overrides
+        the automatic detection.
+
+        Intended for use when Streamlink is running on a UNIX-like OS but writing
+        to Windows filesystems such as NTFS; USB devices using VFAT or exFAT; CIFS
+        shares that are enforcing Windows filename limitations, etc.
+
+        These characters are replaced with an underscore for the rules in use:
+
+          POSIX  : \\x00-\\x1F /
+          Windows: \\x00-\\x1F \\x7F " * / : < > ? \\ |
         """
     )
 
@@ -589,6 +658,13 @@ def build_parser():
 
         This is an alternative to setting the stream using a positional argument
         and can be useful if set in a config file.
+        """
+    )
+    stream.add_argument(
+        "--stream-url",
+        action="store_true",
+        help="""
+        If possible, translate the resolved stream to a URL and print it.
         """
     )
     stream.add_argument(
@@ -639,7 +715,7 @@ def build_parser():
         not listed will be omitted from the available streams list.  A ``*`` can
         be used as a wildcard to match any other type of stream, eg. muxed-stream.
 
-        Default is "rtmp,hls,hds,http,akamaihd,*".
+        Default is "hls,http,*".
         """
     )
     stream.add_argument(
@@ -674,6 +750,19 @@ def build_parser():
     )
 
     transport = parser.add_argument_group("Stream transport options")
+    transport_hls = transport.add_argument_group("HLS options")
+    transport_ffmpeg = transport.add_argument_group("FFmpeg options")
+
+    transport.add_argument(
+        "--dash-manifest-reload-attempts",
+        type=num(int, min=0),
+        metavar="ATTEMPTS",
+        help="""
+        How many attempts should be made to reload a dynamic DASH manifest.
+
+        Default is 3.
+        """
+    )
     transport.add_argument(
         "--dash-manifest-reload-attempts",
         type=num(int, min=0),
@@ -689,142 +778,156 @@ def build_parser():
         type=num(float, min=0),
         metavar="SECONDS",
         help="""
-        The time live HDS streams will start from the edge of stream.
+        The maximum size of the ringbuffer. Mega- or kilobytes can be specified via the M or K suffix respectively.
 
-        Default is 10.0.
+        The ringbuffer is used as a temporary storage between the stream and the player.
+        This allows Streamlink to download the stream faster than the player which reads the data from the ringbuffer.
+
+        The smaller the size of the ringbuffer, the higher the chance of the player buffering if the download speed decreases,
+        and the higher the size, the more data can be use as a storage to recover from volatile download speeds.
+
+        Most players have their own additional cache and will read the ringbuffer's content as soon as data is available.
+        If the player stops reading data while playback is paused, Streamlink will continue to download the stream in the
+        background as long as the ringbuffer doesn't get full.
+
+        Default is "16M".
+
+        Note: A smaller size is recommended on lower end systems (such as Raspberry Pi) when playing stream types that require
+        some extra processing to avoid unnecessary background processing.
         """
     )
     transport.add_argument(
-        "--hds-segment-attempts",
+        "--stream-segment-attempts",
         type=num(int, min=0),
         metavar="ATTEMPTS",
         help="""
-        How many attempts should be done to download each HDS segment before
-        giving up.
+        How many attempts should be done to download each segment before giving up.
+
+        This applies to all different kinds of segmented stream types, such as DASH, HLS, etc.
 
         Default is 3.
         """
     )
     transport.add_argument(
-        "--hds-segment-threads",
+        "--stream-segment-threads",
         type=num(int, max=10),
         metavar="THREADS",
         help="""
-        The size of the thread pool used to download HDS segments. Minimum value
-        is 1 and maximum is 10.
+        The size of the thread pool used to download segments. Minimum value is 1 and maximum is 10.
+
+        This applies to all different kinds of segmented stream types, such as DASH, HLS, etc.
 
         Default is 1.
         """
     )
     transport.add_argument(
-        "--hds-segment-timeout",
+        "--stream-segment-timeout",
         type=num(float, min=0),
         metavar="TIMEOUT",
         help="""
-        HDS segment connect and read timeout.
+        Segment connect and read timeout.
+
+        This applies to all different kinds of segmented stream types, such as DASH, HLS, etc.
 
         Default is 10.0.
         """
     )
     transport.add_argument(
-        "--hds-timeout",
+        "--stream-timeout",
         type=num(float, min=0),
         metavar="TIMEOUT",
         help="""
-        Timeout for reading data from HDS streams.
+        Timeout for reading data from streams.
+
+        This applies to all different kinds of stream types, such as DASH, HLS, HTTP, etc.
 
         Default is 60.0.
         """
     )
     transport.add_argument(
+        "--mux-subtitles",
+        action="store_true",
+        help="""
+        Automatically mux available subtitles into the output stream.
+
+        Needs to be supported by the used plugin.
+        """
+    )
+
+    transport_hls.add_argument(
         "--hls-live-edge",
         type=num(int, min=0),
         metavar="SEGMENTS",
         help="""
-        How many segments from the end to start live HLS streams on.
+        Number of segments from the live stream's current live position to begin streaming.
+        The size or length of each segment is determined by the streaming provider.
 
-        The lower the value the lower latency from the source you will be,
-        but also increases the chance of buffering.
+        Lower values will decrease the latency, but will also increase the chance of buffering, as there is less time for
+        Streamlink to download segments and write their data to the output buffer. The number of parallel segment downloads
+        can be set with --stream-segment-threads and the HLS playlist reload time to fetch and queue new segments can be
+        overridden with --hls-playlist-reload-time.
 
         Default is 3.
+
+        Note: During live playback, the caching/buffering settings of the used player will add additional latency. To adjust
+        this, please refer to the player's own documentation for the required configuration. Player parameters can be set via
+        --player-args.
         """
     )
-    transport.add_argument(
+    transport_hls.add_argument(
         "--hls-segment-stream-data",
         action="store_true",
         help="""
         Immediately write segment data into output buffer while downloading.
         """
     )
-    transport.add_argument(
-        "--hls-segment-attempts",
-        type=num(int, min=0),
-        metavar="ATTEMPTS",
-        help="""
-        How many attempts should be done to download each HLS segment before
-        giving up.
-
-        Default is 3.
-        """
-    )
-    transport.add_argument(
+    transport_hls.add_argument(
         "--hls-playlist-reload-attempts",
         type=num(int, min=0),
         metavar="ATTEMPTS",
         help="""
-        How many attempts should be done to reload the HLS playlist before
-        giving up.
+        How many attempts should be done to reload the HLS playlist before giving up.
 
         Default is 3.
         """
     )
-    transport.add_argument(
-        "--hls-segment-threads",
-        type=num(int, max=10),
-        metavar="THREADS",
+    transport_hls.add_argument(
+        "--hls-playlist-reload-time",
+        metavar="TIME",
         help="""
-        The size of the thread pool used to download HLS segments. Minimum value
-        is 1 and maximum is 10.
+        Set a custom HLS playlist reload time value, either in seconds
+        or by using one of the following keywords:
 
-        Default is 1.
+            segment: The duration of the last segment in the current playlist
+            live-edge: The sum of segment durations of the live edge value minus one
+            default: The playlist's target duration metadata
+
+        Default is default.
         """
     )
-    transport.add_argument(
-        "--hls-segment-timeout",
-        type=num(float, min=0),
-        metavar="TIMEOUT",
-        help="""
-        HLS segment connect and read timeout.
-
-        Default is 10.0.
-        """)
-    transport.add_argument(
+    transport_hls.add_argument(
         "--hls-segment-ignore-names",
         metavar="NAMES",
         type=comma_list,
         help="""
-        A comma-delimited list of segment names that will not be fetched.
+        A comma-delimited list of segment names that will get filtered out.
 
         Example: --hls-segment-ignore-names 000,001,002
 
         This will ignore every segment that ends with 000.ts, 001.ts and 002.ts
 
         Default is None.
-
-        Note: The --hls-timeout must be increased, to a time that is longer than
-        the ignored break.
         """
     )
-    transport.add_argument(
+    transport_hls.add_argument(
         "--hls-segment-key-uri",
         metavar="URI",
         type=str,
         help="""
-        URI to segment encryption key. If no URI is specified, the URI contained
-        in the segments will be used.
+        Override the segment encryption key URIs for encrypted streams.
 
-        URI can be templated using the following variables, which will be
-        replaced with its respective part from the source segment URI:
+        The value can be templated using the following variables, which will be
+        replaced with their respective part from the source segment URI:
 
           {url} {scheme} {netloc} {path} {query}
 
@@ -837,7 +940,7 @@ def build_parser():
         Default is None.
         """
     )
-    transport.add_argument(
+    transport_hls.add_argument(
         "--hls-audio-select",
         type=comma_list,
         metavar="CODE",
@@ -855,17 +958,9 @@ def build_parser():
         Note: This is only useful in special circumstances where the regular
         locale option fails, such as when multiple sources of the same language
         exists.
-        """)
-    transport.add_argument(
-        "--hls-timeout",
-        type=num(float, min=0),
-        metavar="TIMEOUT",
-        help="""
-        Timeout for reading data from HLS streams.
-
-        Default is 60.0.
-        """)
-    transport.add_argument(
+        """
+    )
+    transport_hls.add_argument(
         "--hls-start-offset",
         type=hours_minutes_seconds,
         metavar="[HH:]MM:SS",
@@ -875,8 +970,9 @@ def build_parser():
         streams, this is a negative offset from the end of the stream (rewind).
 
         Default is 00:00:00.
-        """)
-    transport.add_argument(
+        """
+    )
+    transport_hls.add_argument(
         "--hls-duration",
         type=hours_minutes_seconds,
         metavar="[HH:]MM:SS",
@@ -887,166 +983,23 @@ def build_parser():
         nearest HLS segment.
 
         Default is unlimited.
-        """)
-    transport.add_argument(
+        """
+    )
+    transport_hls.add_argument(
         "--hls-live-restart",
         action="store_true",
         help="""
         Skip to the beginning of a live stream, or as far back as possible.
-        """)
-    transport.add_argument(
-        "--http-stream-timeout",
-        type=num(float, min=0),
-        metavar="TIMEOUT",
-        help="""
-        Timeout for reading data from HTTP streams.
-
-        Default is 60.0.
-        """)
-    transport.add_argument(
-        "--ringbuffer-size",
-        metavar="SIZE",
-        type=filesize,
-        help="""
-        The maximum size of ringbuffer. Add a M or K suffix to specify mega or
-        kilo bytes instead of bytes.
-
-        The ringbuffer is used as a temporary storage between the stream and the
-        player. This is to allows us to download the stream faster than the
-        player wants to read it.
-
-        The smaller the size, the higher chance of the player buffering if there
-        are download speed dips and the higher size the more data we can use as
-        a storage to catch up from speed dips.
-
-        It also allows you to temporary pause as long as the ringbuffer doesn't
-        get full since we continue to download the stream in the background.
-
-        Default is "16M".
-
-        Note: A smaller size is recommended on lower end systems (such as
-        Raspberry Pi) when playing stream types that require some extra
-        processing (such as HDS) to avoid unnecessary background processing.
-        """)
-    transport.add_argument(
-        "--rtmp-proxy", "--rtmpdump-proxy",
-        metavar="PROXY",
-        help="""
-        A SOCKS proxy that RTMP streams will use.
-
-        Example: 127.0.0.1:9050
         """
     )
-    transport.add_argument(
-        "--rtmp-rtmpdump", "--rtmpdump",
-        metavar="FILENAME",
-        help="""
-        RTMPDump is used to access RTMP streams. You can specify the
-        location of the rtmpdump executable if it is not in your PATH.
+    transport_hls.add_argument("--hls-segment-attempts", help=argparse.SUPPRESS)
+    transport_hls.add_argument("--hls-segment-threads", help=argparse.SUPPRESS)
+    transport_hls.add_argument("--hls-segment-timeout", help=argparse.SUPPRESS)
+    transport_hls.add_argument("--hls-timeout", help=argparse.SUPPRESS)
 
-        Example: "/usr/local/bin/rtmpdump"
-        """
-    )
-    transport.add_argument(
-        "--rtmp-timeout",
-        type=num(float, min=0),
-        metavar="TIMEOUT",
-        help="""
-        Timeout for reading data from RTMP streams.
+    transport.add_argument("--http-stream-timeout", help=argparse.SUPPRESS)
 
-        Default is 60.0.
-        """
-    )
-    transport.add_argument(
-        "--stream-segment-attempts",
-        type=num(int, min=0),
-        metavar="ATTEMPTS",
-        help="""
-        How many attempts should be done to download each segment before giving
-        up.
-
-        This is generic option used by streams not covered by other options,
-        such as stream protocols specific to plugins, e.g. UStream.
-
-        Default is 3.
-        """
-    )
-    transport.add_argument(
-        "--stream-segment-threads",
-        type=num(int, max=10),
-        metavar="THREADS",
-        help="""
-        The size of the thread pool used to download segments. Minimum value is
-        1 and maximum is 10.
-
-        This is generic option used by streams not covered by other options,
-        such as stream protocols specific to plugins, e.g. UStream.
-
-        Default is 1.
-        """
-    )
-    transport.add_argument(
-        "--stream-segment-timeout",
-        type=num(float, min=0),
-        metavar="TIMEOUT",
-        help="""
-        Segment connect and read timeout.
-
-        This is generic option used by streams not covered by other options,
-        such as stream protocols specific to plugins, e.g. UStream.
-
-        Default is 10.0.
-        """)
-    transport.add_argument(
-        "--stream-timeout",
-        type=num(float, min=0),
-        metavar="TIMEOUT",
-        help="""
-        Timeout for reading data from streams.
-
-        This is generic option used by streams not covered by other options,
-        such as stream protocols specific to plugins, e.g. UStream.
-
-        Default is 60.0.
-        """)
-    transport.add_argument(
-        "--stream-url",
-        action="store_true",
-        help="""
-        If possible, translate the stream to a URL and print it.
-        """
-    )
-    transport.add_argument(
-        "--subprocess-cmdline", "--cmdline", "-c",
-        action="store_true",
-        help="""
-        Print the command-line used internally to play the stream.
-
-        This is only available on RTMP streams.
-        """
-    )
-    transport.add_argument(
-        "--subprocess-errorlog", "--errorlog", "-e",
-        action="store_true",
-        help="""
-        Log possible errors from internal subprocesses to a temporary file. The
-        file will be saved in your systems temporary directory.
-
-        Useful when debugging rtmpdump related issues.
-        """
-    )
-    transport.add_argument(
-        "--subprocess-errorlog-path", "--errorlog-path",
-        type=str,
-        metavar="PATH",
-        help="""
-        Log the subprocess errorlog to a specific file rather than a temporary
-        file. Takes precedence over subprocess-errorlog.
-
-        Useful when debugging rtmpdump related issues.
-        """
-    )
-    transport.add_argument(
+    transport_ffmpeg.add_argument(
         "--ffmpeg-ffmpeg",
         metavar="FILENAME",
         help="""
@@ -1057,14 +1010,14 @@ def build_parser():
         Example: "/usr/local/bin/ffmpeg"
         """
     )
-    transport.add_argument(
+    transport_ffmpeg.add_argument(
         "--ffmpeg-verbose",
         action="store_true",
         help="""
         Write the console output from ffmpeg to the console.
         """
     )
-    transport.add_argument(
+    transport_ffmpeg.add_argument(
         "--ffmpeg-verbose-path",
         type=str,
         metavar="PATH",
@@ -1072,26 +1025,53 @@ def build_parser():
         Path to write the output from the ffmpeg console.
         """
     )
-    transport.add_argument(
+    transport_ffmpeg.add_argument(
+        "--ffmpeg-fout",
+        type=str,
+        metavar="OUTFORMAT",
+        help="""
+        When muxing streams, set the output format to OUTFORMAT.
+
+        Default is "matroska".
+
+        Example: "mpegts"
+        """
+    )
+    transport_ffmpeg.add_argument(
         "--ffmpeg-video-transcode",
         metavar="CODEC",
         help="""
-        When muxing streams transcode the video to this CODEC.
+        When muxing streams, transcode the video to CODEC.
 
         Default is "copy".
 
         Example: "h264"
         """
     )
-    transport.add_argument(
+    transport_ffmpeg.add_argument(
         "--ffmpeg-audio-transcode",
         metavar="CODEC",
         help="""
-        When muxing streams transcode the audio to this CODEC.
+        When muxing streams, transcode the audio to CODEC.
 
         Default is "copy".
 
         Example: "aac"
+        """
+    )
+    transport_ffmpeg.add_argument(
+        "--ffmpeg-copyts",
+        action="store_true",
+        help="""
+        Forces the -copyts ffmpeg option and does not remove
+        the initial start time offset value.
+        """
+    )
+    transport_ffmpeg.add_argument(
+        "--ffmpeg-start-at-zero",
+        action="store_true",
+        help="""
+        Enable the -start_at_zero ffmpeg option when using copyts.
         """
     )
 
@@ -1100,21 +1080,12 @@ def build_parser():
         "--http-proxy",
         metavar="HTTP_PROXY",
         help="""
-        A HTTP proxy to use for all HTTP requests, including WebSocket connections.
-        By default this proxy will be used for all HTTPS requests too.
+        A HTTP proxy to use for all HTTP and HTTPS requests, including WebSocket connections.
 
         Example: "http://hostname:port/"
         """
     )
-    http.add_argument(
-        "--https-proxy",
-        metavar="HTTPS_PROXY",
-        help="""
-        A HTTPS capable proxy to use for all HTTPS requests.
-
-        Example: "https://hostname:port/"
-        """
-    )
+    http.add_argument("--https-proxy", help=argparse.SUPPRESS)
     http.add_argument(
         "--http-cookie",
         metavar="KEY=VALUE",
@@ -1205,27 +1176,6 @@ def build_parser():
         """
     )
 
-    # Deprecated options
-    http.add_argument(
-        "--http-cookies",
-        metavar="COOKIES",
-        help=argparse.SUPPRESS
-    )
-    http.add_argument(
-        "--http-headers",
-        metavar="HEADERS",
-        help=argparse.SUPPRESS
-    )
-    http.add_argument(
-        "--http-query-params",
-        metavar="PARAMS",
-        help=argparse.SUPPRESS
-    )
-    general.add_argument(
-        "--no-version-check",
-        action="store_true",
-        help=argparse.SUPPRESS
-    )
     return parser
 
 

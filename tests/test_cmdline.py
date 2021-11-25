@@ -1,19 +1,10 @@
 import os.path
 import unittest
+from unittest.mock import ANY, Mock, patch
 
-from streamlink import Streamlink
 import streamlink_cli.main
+from streamlink import Streamlink
 from streamlink_cli.compat import is_win32
-
-from tests.mock import patch, ANY
-
-PluginPath = os.path.join(os.path.dirname(__file__), "plugins")
-
-
-def setup_streamlink():
-    streamlink_cli.main.streamlink = Streamlink()
-    streamlink_cli.main.streamlink.load_plugins(PluginPath)
-    return streamlink_cli.main.streamlink
 
 
 class CommandLineTestCase(unittest.TestCase):
@@ -21,12 +12,13 @@ class CommandLineTestCase(unittest.TestCase):
     Test that when invoked for the command line arguments are parsed as expected
     """
 
-    @patch('streamlink_cli.main.CONFIG_FILES', ["/dev/null"])
-    @patch('streamlink_cli.main.setup_streamlink', side_effect=setup_streamlink)
+    @patch('streamlink_cli.main.CONFIG_FILES', [])
+    @patch('streamlink_cli.main.setup_streamlink')
     @patch('streamlink_cli.output.sleep')
-    @patch('subprocess.Popen')
+    @patch('streamlink_cli.output.subprocess.call')
+    @patch('streamlink_cli.output.subprocess.Popen')
     @patch('sys.argv')
-    def _test_args(self, args, commandline, mock_argv, mock_popen, mock_sleep, mock_setup_streamlink,
+    def _test_args(self, args, commandline, mock_argv, mock_popen, mock_call, mock_sleep, mock_setup_streamlink,
                    passthrough=False, exit_code=0):
         mock_argv.__getitem__.side_effect = lambda x: args[x]
 
@@ -37,20 +29,24 @@ class CommandLineTestCase(unittest.TestCase):
 
             return fn
 
-        mock_popen().poll.side_effect = side_effect([None, 0])
+        mock_popen.return_value = Mock(poll=Mock(side_effect=side_effect([None, 0])))
+
+        session = Streamlink()
+        session.load_plugins(os.path.join(os.path.dirname(__file__), "plugin"))
 
         actual_exit_code = 0
-        try:
-            streamlink_cli.main.main()
-        except SystemExit as exc:
-            actual_exit_code = exc.code
+        with patch('streamlink_cli.main.streamlink', session):
+            try:
+                streamlink_cli.main.main()
+            except SystemExit as exc:
+                actual_exit_code = exc.code
 
         self.assertEqual(exit_code, actual_exit_code)
         mock_setup_streamlink.assert_called_with()
         if not passthrough:
             mock_popen.assert_called_with(commandline, stderr=ANY, stdout=ANY, bufsize=ANY, stdin=ANY)
         else:
-            mock_popen.assert_called_with(commandline, stderr=ANY, stdout=ANY)
+            mock_call.assert_called_with(commandline, stderr=ANY, stdout=ANY)
 
 
 @unittest.skipIf(is_win32, "test only applicable in a POSIX OS")
@@ -77,10 +73,10 @@ class TestCommandLinePOSIX(CommandLineTestCase):
                         ["/usr/bin/player", "--input-title-format", 'Poker "Stars"', "-"])
 
     def test_open_player_extra_args_in_player_pass_through(self):
-        self._test_args(["streamlink", "--player-passthrough", "rtmp", "-p", "/usr/bin/player",
+        self._test_args(["streamlink", "--player-passthrough", "hls", "-p", "/usr/bin/player",
                          "-a", '''--input-title-format "Poker \\"Stars\\"" {filename}''',
-                         "test.se", "rtmp"],
-                        ["/usr/bin/player", "--input-title-format", 'Poker "Stars"', "rtmp://test.se"],
+                         "test.se", "hls"],
+                        ["/usr/bin/player", "--input-title-format", 'Poker "Stars"', "http://test.se/playlist.m3u8"],
                         passthrough=True)
 
     def test_single_hyphen_extra_player_args_971(self):
@@ -118,10 +114,11 @@ class TestCommandLineWindows(CommandLineTestCase):
                         '''c:\\Program Files\\Player\\player.exe --input-title-format "Poker \\"Stars\\"" -''')
 
     def test_open_player_extra_args_in_player_pass_through(self):
-        self._test_args(["streamlink", "--player-passthrough", "rtmp", "-p", "c:\\Program Files\\Player\\player.exe",
+        self._test_args(["streamlink", "--player-passthrough", "hls", "-p", "c:\\Program Files\\Player\\player.exe",
                          "-a", '''--input-title-format "Poker \\"Stars\\"" {filename}''',
-                         "test.se", "rtmp"],
-                        '''c:\\Program Files\\Player\\player.exe --input-title-format "Poker \\"Stars\\"" \"rtmp://test.se\"''',
+                         "test.se", "hls"],
+                        '''c:\\Program Files\\Player\\player.exe'''
+                        + ''' --input-title-format "Poker \\"Stars\\"" \"http://test.se/playlist.m3u8\"''',
                         passthrough=True)
 
     def test_single_hyphen_extra_player_args_971(self):

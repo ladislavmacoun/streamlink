@@ -1,5 +1,3 @@
-.. _api:
-
 API Reference
 =============
 
@@ -46,27 +44,16 @@ All streams inherit from the :class:`Stream` class.
     :members:
 
 
-.. _api-stream-subclasses:
-
 Stream subclasses
 ^^^^^^^^^^^^^^^^^
 
 You are able to inspect the parameters used by each stream,
 different properties are available depending on stream type.
 
-.. autoclass:: AkamaiHDStream
-    :members:
-
-.. autoclass:: HDSStream
-    :members:
-
 .. autoclass:: HLSStream
     :members:
 
 .. autoclass:: HTTPStream
-    :members:
-
-.. autoclass:: RTMPStream
     :members:
 
 .. autoclass:: DASHStream

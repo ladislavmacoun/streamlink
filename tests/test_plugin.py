@@ -1,12 +1,20 @@
-import unittest
-import time
 import datetime
+import re
+import time
+import unittest
+from unittest.mock import Mock, call, patch
+
 import freezegun
+import pytest
 import requests.cookies
 
+from streamlink.plugin import HIGH_PRIORITY, NORMAL_PRIORITY, Plugin, pluginmatcher
+from streamlink.plugin.plugin import Matcher
 
-from tests.mock import Mock, call
-from streamlink.plugin import Plugin
+
+class FakePlugin(Plugin):
+    def _get_streams(self):
+        pass  # pragma: no cover
 
 
 class TestPlugin(unittest.TestCase):
@@ -130,12 +138,91 @@ class TestPlugin(unittest.TestCase):
 
     def test_cookie_load_unbound(self):
         plugin = Plugin("http://test.se")
-        self.assertRaises(RuntimeError, plugin.load_cookies)
+        with self.assertRaises(RuntimeError) as cm:
+            plugin.load_cookies()
+        self.assertEqual(str(cm.exception), "Cannot load cached cookies in unbound plugin")
 
     def test_cookie_save_unbound(self):
         plugin = Plugin("http://test.se")
-        self.assertRaises(RuntimeError, plugin.save_cookies)
+        with self.assertRaises(RuntimeError) as cm:
+            plugin.save_cookies()
+        self.assertEqual(str(cm.exception), "Cannot cache cookies in unbound plugin")
 
     def test_cookie_clear_unbound(self):
         plugin = Plugin("http://test.se")
-        self.assertRaises(RuntimeError, plugin.clear_cookies)
+        with self.assertRaises(RuntimeError) as cm:
+            plugin.clear_cookies()
+        self.assertEqual(str(cm.exception), "Cannot clear cached cookies in unbound plugin")
+
+
+class TestPluginMatcher(unittest.TestCase):
+    @patch("builtins.repr", Mock(return_value="Foo"))
+    def test_decorator(self):
+        with self.assertRaises(TypeError) as cm:
+            @pluginmatcher(re.compile(""))
+            class Foo:
+                pass
+        self.assertEqual(str(cm.exception), "Foo is not a Plugin")
+
+        @pluginmatcher(re.compile("foo", re.VERBOSE))
+        @pluginmatcher(re.compile("bar"), priority=HIGH_PRIORITY)
+        class Bar(FakePlugin):
+            pass
+
+        self.assertEqual(Bar.matchers, [
+            Matcher(re.compile("foo", re.VERBOSE), NORMAL_PRIORITY),
+            Matcher(re.compile("bar"), HIGH_PRIORITY)
+        ])
+
+    def test_url_setter(self):
+        @pluginmatcher(re.compile("http://(foo)"))
+        @pluginmatcher(re.compile("http://(bar)"))
+        @pluginmatcher(re.compile("http://(baz)"))
+        class MyPlugin(FakePlugin):
+            pass
+
+        MyPlugin.bind(Mock(), "tests.test_plugin")
+
+        plugin = MyPlugin("http://foo")
+        self.assertEqual(plugin.url, "http://foo")
+        self.assertEqual([m is not None for m in plugin.matches], [True, False, False])
+        self.assertEqual(plugin.matcher, plugin.matchers[0].pattern)
+        self.assertEqual(plugin.match.group(1), "foo")
+
+        plugin.url = "http://bar"
+        self.assertEqual(plugin.url, "http://bar")
+        self.assertEqual([m is not None for m in plugin.matches], [False, True, False])
+        self.assertEqual(plugin.matcher, plugin.matchers[1].pattern)
+        self.assertEqual(plugin.match.group(1), "bar")
+
+        plugin.url = "http://baz"
+        self.assertEqual(plugin.url, "http://baz")
+        self.assertEqual([m is not None for m in plugin.matches], [False, False, True])
+        self.assertEqual(plugin.matcher, plugin.matchers[2].pattern)
+        self.assertEqual(plugin.match.group(1), "baz")
+
+        plugin.url = "http://qux"
+        self.assertEqual(plugin.url, "http://qux")
+        self.assertEqual([m is not None for m in plugin.matches], [False, False, False])
+        self.assertEqual(plugin.matcher, None)
+        self.assertEqual(plugin.match, None)
+
+
+@pytest.mark.parametrize("attr", ["id", "author", "category", "title"])
+def test_plugin_metadata(attr):
+    plugin = FakePlugin("https://foo.bar/")
+    getter = getattr(plugin, f"get_{attr}")
+    assert callable(getter)
+
+    assert getattr(plugin, attr) is None
+    assert getter() is None
+
+    setattr(plugin, attr, " foo bar ")
+    assert getter() == "foo bar"
+
+    class Foo:
+        def __str__(self):
+            return " baz qux "
+
+    setattr(plugin, attr, Foo())
+    assert getter() == "baz qux"

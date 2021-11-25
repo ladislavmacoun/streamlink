@@ -19,7 +19,7 @@ Please read the following guidelines before you [report an issue][issues]:
 
 5. **Format your issue report** — [well formatted texts][mastering-markdown] will make it much easier for developers to understand your report.
 
-Please try to be as detailed as possible in your report too. What is your environment? What steps will reproduce the issue? What would you expect the outcome to be? All these details will help people to assess and fix any potential bugs. The [issue template][issue-template] will aid you in structuring your report when submitting a new issue. If your report includes log output, please provide it as text in multi-line code blocks if possible for better readability. Thank you!
+Please try to be as detailed as possible in your report too. What is your environment? What steps will reproduce the issue? What would you expect the outcome to be? All these details will help people to assess and fix any potential bugs. The various issue templates will aid you in structuring your report when submitting a new issue. Thank you!
 
 
 ## Feature requests
@@ -43,11 +43,17 @@ Plugins which fall under the following categories will not be implemented or con
 
 5. NSFW sites of a pornographic nature (cam sites, porn sites, etc.)
 
-6. Sites which are mostly hosting VODs (stolen or legitimate), or require large changes to existing code to watch VODs
+6. Sites which don't provide any real live streaming content, eg. only VODs or VODs being rebroadcasted
 
-7. Sites where the maintainer has requested we not add their site to Streamlink
+7. Sites which don't provide any video streaming content, eg. radio stations
 
-8. Sites which are unmaintained.
+8. Sites where the maintainer has requested we not add their site to Streamlink
+
+9. Sites which are unmaintained, are in beta or are undergoing heavy amounts of development and may change rapidly
+
+10. Sites which have no way to determine viewership numbers
+
+11. Sites which are static cameras of a physical location
 
 ## Pull requests
 
@@ -105,7 +111,6 @@ This contributing guide has been adapted from [HTML5 boilerplate's guide][ref-h5
 
   [issues]: https://github.com/streamlink/streamlink/issues
   [known-issues]: https://github.com/streamlink/streamlink/blob/master/KNOWN_ISSUES.md
-  [issue-template]: https://github.com/streamlink/streamlink/blob/master/ISSUE_TEMPLATE.md
   [mastering-markdown]: https://guides.github.com/features/mastering-markdown
   [howto-fork]: https://help.github.com/articles/fork-a-repo
   [howto-rebase]: https://help.github.com/articles/interactive-rebase

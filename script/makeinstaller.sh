@@ -12,6 +12,7 @@ err() {
 
 
 declare -A DEPS=(
+    [pip]=pip
     [makensis]=NSIS
     [pynsist]=pynsist
     [convert]=Imagemagick
@@ -33,9 +34,9 @@ cd "${ROOT}"
 STREAMLINK_VERSION=$(python setup.py --version)
 STREAMLINK_VERSION_PLAIN="${STREAMLINK_VERSION%%+*}"
 STREAMLINK_INSTALLER="${1:-"streamlink-${STREAMLINK_VERSION/\+/_}"}"
-STREAMLINK_PYTHON_VERSION=3.6.6
-STREAMLINK_ASSETS_REPO="${STREAMLINK_ASSETS_REPO:-streamlink/streamlink-assets}"
-STREAMLINK_ASSETS_RELEASE="${STREAMLINK_ASSETS_RELEASE:-latest}"
+STREAMLINK_PYTHON_VERSION=3.9.8
+STREAMLINK_ASSETS_FILE="${ROOT}/script/makeinstaller-assets.json"
+STREAMLINK_REQUIREMENTS_FILE="${ROOT}/script/makeinstaller-requirements.json"
 
 CI_BUILD_NUMBER=${GITHUB_RUN_ID:-0}
 STREAMLINK_VI_VERSION="${STREAMLINK_VERSION_PLAIN}.${CI_BUILD_NUMBER}"
@@ -49,6 +50,7 @@ cache_dir="${build_dir}/cache"
 nsis_dir="${build_dir}/nsis"
 files_dir="${build_dir}/files"
 icons_dir="${files_dir}/icons"
+wheels_dir=$(mktemp -d) && trap "rm -rf '${wheels_dir}'" RETURN || exit 255
 
 removed_plugins_file="${ROOT}/src/streamlink/plugins/.removed"
 
@@ -74,6 +76,31 @@ done
 convert "${icons_dir}"/icon-{16,32,48,256}.png "${icons_dir}/icon.ico" 2>/dev/null
 
 
+log "Downloading dependency wheels"
+pip download \
+    --disable-pip-version-check \
+    --progress-bar off \
+    --no-cache-dir \
+    --require-hashes \
+    --only-binary :all: \
+    --platform win32 \
+    --python-version "${STREAMLINK_PYTHON_VERSION}" \
+    --implementation cp \
+    --dest "${wheels_dir}" \
+    --requirement /dev/stdin \
+    < <(jq -r '.wheels | to_entries[] | "\(.key)==\(.value)"' "${STREAMLINK_REQUIREMENTS_FILE}")
+
+log "Locally building missing dependency wheels"
+pip wheel \
+    --disable-pip-version-check \
+    --progress-bar off \
+    --no-cache-dir \
+    --require-hashes \
+    --no-binary :all: \
+    --wheel-dir "${wheels_dir}" \
+    --requirement /dev/stdin \
+    < <(jq -r '.build_wheels | to_entries[] | "\(.key)==\(.value)"' "${STREAMLINK_REQUIREMENTS_FILE}")
+
 log "Configuring installer"
 
 cat > "${build_dir}/streamlink.cfg" <<EOF
@@ -89,39 +116,10 @@ version=${STREAMLINK_PYTHON_VERSION}
 format=bundled
 
 [Include]
-; dep tree
-;   streamlink+streamlink_cli
-;       - pkg-resources (indirect)
-;           - pyparsing
-;           - packaging
-;           - six
-;       - iso639
-;       - iso3166
-;       - pycryptodome
-;       - requests
-;           - certifi
-;           - idna
-;           - urllib3
-;           - socks / sockshandler
-;       - websocket-client
-;       - isodate
 packages=pkg_resources
-         six
-         iso639
-         iso3166
-         requests
-         urllib3
-         idna
-         chardet
-         certifi
-         websocket
-         socks
-         sockshandler
-         isodate
-pypi_wheels=pycryptodome==3.6.4
+local_wheels=${wheels_dir}/*.whl
 
-files=${ROOT}/win32/THIRD-PARTY.txt > \$INSTDIR
-      ${ROOT}/build/lib/streamlink > \$INSTDIR\pkgs
+files=${ROOT}/build/lib/streamlink > \$INSTDIR\pkgs
       ${ROOT}/build/lib/streamlink_cli > \$INSTDIR\pkgs
 
 [Command streamlink]
@@ -169,7 +167,7 @@ cat > "${build_dir}/installer_tmpl.nsi" <<EOF
 
     Function EditConfig
         SetShellVarContext current
-        Exec '"\$WINDIR\notepad.exe" "\$APPDATA\streamlink\streamlinkrc"'
+        Exec '"\$WINDIR\notepad.exe" "\$APPDATA\streamlink\config"'
         SetShellVarContext all
     FunctionEnd
 
@@ -198,20 +196,11 @@ cat > "${build_dir}/installer_tmpl.nsi" <<EOF
 [% block sections %]
 [[ super()  ]]
 SubSection /e "Bundled tools" bundled
-    Section "rtmpdump" rtmpdump
-        SetOutPath "\$INSTDIR\rtmpdump"
-        File /r "${files_dir}\rtmpdump\*.*"
-        SetShellVarContext current
-        \${ConfigWrite} "\$APPDATA\streamlink\streamlinkrc" "rtmpdump=" "\$INSTDIR\rtmpdump\rtmpdump.exe" \$R0
-        SetShellVarContext all
-        SetOutPath -
-    SectionEnd
-
     Section "FFMPEG" ffmpeg
         SetOutPath "\$INSTDIR\ffmpeg"
         File /r "${files_dir}\ffmpeg\*.*"
         SetShellVarContext current
-        \${ConfigWrite} "\$APPDATA\streamlink\streamlinkrc" "ffmpeg-ffmpeg=" "\$INSTDIR\ffmpeg\ffmpeg.exe" \$R0
+        \${ConfigWrite} "\$APPDATA\streamlink\config" "ffmpeg-ffmpeg=" "\$INSTDIR\ffmpeg\ffmpeg.exe" \$R0
         SetShellVarContext all
         SetOutPath -
     SectionEnd
@@ -224,7 +213,7 @@ SubSectionEnd
     SetShellVarContext current # install the config file for the current user
     SetOverwrite off # config file we don't want to overwrite
     SetOutPath \$APPDATA\streamlink
-    File /r "${files_dir}\streamlinkrc"
+    File /r "${files_dir}\config"
     SetOverwrite ifnewer
     SetOutPath -
     SetShellVarContext all
@@ -242,7 +231,6 @@ SubSectionEnd
 
 [% block uninstall_files %]
     [[ super() ]]
-    RMDir /r "\$INSTDIR\rtmpdump"
     RMDir /r "\$INSTDIR\ffmpeg"
 [% endblock %]
 
@@ -272,68 +260,57 @@ StrCmp \$0 \${sec_app} "" +2
 StrCmp \$0 \${bundled} "" +2
   SendMessage \$R0 \${WM_SETTEXT} 0 "STR:Extra tools used to play some streams"
 
-StrCmp \$0 \${rtmpdump} "" +2
-  SendMessage \$R0 \${WM_SETTEXT} 0 "STR:rtmpdump is used to play RTMP streams"
-
 StrCmp \$0 \${ffmpeg} "" +2
   SendMessage \$R0 \${WM_SETTEXT} 0 "STR:FFMPEG is used to mux separate video and audio streams, for example high quality YouTube videos or DASH streams"
 
 [% endblock %]
 EOF
 
-# copy the streamlinkrc file to the build dir, we cannot use the Include.files property in the config file
+# copy the config file to the build dir, we cannot use the Include.files property in the config file
 # because those files will always overwrite, and for a config file we do not want to overwrite
-cp "${ROOT}/win32/streamlinkrc" "${files_dir}/streamlinkrc"
+cp "${ROOT}/win32/config" "${files_dir}/config"
 
 # make sure the license has a file extension
 cp "${ROOT}/LICENSE" "${files_dir}/LICENSE.txt"
 
 
-# download binary assets like ffmpeg and rtmpdump from the streamlink assets repo
-# parse the data.json manifest, validate archives and copy specific files to their destination
-log "Fetching assets data from \"${STREAMLINK_ASSETS_REPO}\" (${STREAMLINK_ASSETS_RELEASE})"
-assets_release_data=$(curl -s --fail \
-    -H 'Accept: application/vnd.github.v3+json' \
-    -H "User-Agent: ${GITHUB_REPOSITORY:-"streamlink/streamlink"}" \
-    "https://api.github.com/repos/${STREAMLINK_ASSETS_REPO}/releases/${STREAMLINK_ASSETS_RELEASE}" \
-    || err "Could not fetch release data"
-)
-assets_release_tag=$(echo "${assets_release_data}" | jq -r ".tag_name")
-assets_data=$(curl -s --fail \
-    -H "User-Agent: ${GITHUB_REPOSITORY:-"streamlink/streamlink"}" \
-    "https://raw.githubusercontent.com/${STREAMLINK_ASSETS_REPO}/${assets_release_tag}/data.json" \
-    || err "Could not fetch manifest data"
-)
+ASSETS_DATA=$(cat "${STREAMLINK_ASSETS_FILE}")
 
-log "Retrieving assets"
-while read -r filename size url; do
-    if ! [[ -f "${cache_dir}/${filename}" ]]; then
-        log "Downloading asset: ${filename} (${size} Bytes)"
-        curl -s -L --output "${cache_dir}/${filename}" "${url}"
-    fi
-    checksum=$(jq -r "[.[] | select(.filename == \"${filename}\")] | first | .checksum" <<< "${assets_data}")
-    echo "${checksum} ${cache_dir}/${filename}" | sha256sum --check -
-done < <(jq -r '.assets[] | "\(.name) \(.size) \(.browser_download_url)"' <<< "${assets_release_data}")
+assets_prepare() {
+    log "Preparing assets"
+    while read -r filename sha256 url; do
+        if ! [[ -f "${cache_dir}/${filename}" ]]; then
+            log "Downloading asset: ${filename}"
+            curl -L -o "${cache_dir}/${filename}" "${url}"
+        fi
+        echo "${sha256} ${cache_dir}/${filename}" | sha256sum --check -
+    done < <(jq -r '.[] | "\(.filename) \(.sha256) \(.url)"' <<< "${ASSETS_DATA}")
+}
 
-log "Assembling files directory"
-TEMP=$(mktemp -d) && trap "rm -rf ${TEMP}" EXIT || exit 255
-for ((i=$(jq length <<< "${assets_data}") - 1; i >= 0; --i)); do
-    read -r filename sourcedir targetdir \
-        < <(jq -r ".[$i] | \"\(.filename) \(.sourcedir) \(.targetdir)\"" <<< "${assets_data}")
-    sourcedir="${TEMP}/${sourcedir}"
-    case "${filename}" in
-        *.zip)
-            unzip "${cache_dir}/${filename}" -d "${TEMP}"
-            ;;
-        *)
-            sourcedir="${cache_dir}"
-            ;;
-    esac
-    while read -r from to; do
-        install -v -D -T "${sourcedir}/${from}" "${files_dir}/${targetdir}/${to}"
-    done < <(jq -r ".[$i].files[] | \"\(.from) \(.to)\"" <<< "${assets_data}")
-done
+assets_assemble() {
+    log "Assembling files directory"
+    local tmp=$(mktemp -d) && trap "rm -rf '${tmp}'" RETURN || exit 255
+    for ((i=$(jq length <<< "${ASSETS_DATA}") - 1; i >= 0; --i)); do
+        read -r type filename sourcedir targetdir \
+            < <(jq -r ".[$i] | \"\(.type) \(.filename) \(.sourcedir) \(.targetdir)\"" <<< "${ASSETS_DATA}")
+        case "${type}" in
+            zip)
+                mkdir -p "${tmp}/${i}"
+                unzip "${cache_dir}/${filename}" -d "${tmp}/${i}"
+                sourcedir="${tmp}/${i}/${sourcedir}"
+                ;;
+            *)
+                sourcedir="${cache_dir}"
+                ;;
+        esac
+        while read -r from to; do
+            install -v -D -T "${sourcedir}/${from}" "${files_dir}/${targetdir}/${to}"
+        done < <(jq -r ".[$i].files[] | \"\(.from) \(.to)\"" <<< "${ASSETS_DATA}")
+    done
+}
 
+assets_prepare
+assets_assemble
 
 log "Building ${STREAMLINK_INSTALLER} installer"
 pynsist "${build_dir}/streamlink.cfg"
